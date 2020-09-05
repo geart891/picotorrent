@@ -202,7 +202,6 @@ Session::Session(wxEvtHandler* parent, std::shared_ptr<pt::Core::Database> db, s
         });
 
     this->LoadTorrents();
-    this->LoadTorrentsOld();
 
     m_timer->Start(1000, wxTIMER_CONTINUOUS);
 
@@ -239,7 +238,7 @@ void Session::AddMetadataSearch(std::vector<libtorrent::info_hash_t> const& hash
         params.flags &= ~lt::torrent_flags::update_subscribe;
         params.flags |= lt::torrent_flags::upload_mode;
 
-        params.info_hash = hash;
+        params.info_hashes = hash;
         params.save_path = tmp.string();
 
         // Track this info hash internally to make sure
@@ -255,9 +254,9 @@ void Session::AddTorrent(lt::add_torrent_params const& params)
     // If we are searching for metadata for this torrent, stop
     // that search and add this one instead.
 
-    if (m_metadataSearches.find(params.info_hash) != m_metadataSearches.end())
+    if (m_metadataSearches.find(params.info_hashes) != m_metadataSearches.end())
     {
-        lt::torrent_handle& hndl = m_metadataSearches.at(params.info_hash);
+        lt::torrent_handle& hndl = m_metadataSearches.at(params.info_hashes);
 
         // By default, an invalid torrent handle is added to the metadata
         // search map. Only remove the handle from the session if it has
@@ -480,7 +479,7 @@ void Session::OnAlert()
             {
                 // Skip torrents which are not found in m_torrents - this can happen
                 // when we recieve alerts for a torrent currently in metadata search
-                if (m_torrents.find(status.info_hash) == m_torrents.end())
+                if (m_torrents.find(status.info_hashes) == m_torrents.end())
                 {
                     continue;
                 }
@@ -495,7 +494,7 @@ void Session::OnAlert()
                     stats.totalWantedDone += status.total_wanted_done;
                 }
 
-                auto handle = m_torrents.at(status.info_hash);
+                auto handle = m_torrents.at(status.info_hashes);
                 handle->UpdateStatus(status);
 
                 handles.push_back(handle);
@@ -548,7 +547,7 @@ void Session::OnAlert()
             }
 
             wxCommandEvent evt(ptEVT_TORRENT_FINISHED);
-            evt.SetClientData(m_torrents.at(ts.info_hash));
+            evt.SetClientData(m_torrents.at(ts.info_hashes));
             wxPostEvent(m_parent, evt);
 
             bool shouldMove = m_cfg->GetBool("move_completed_downloads");
@@ -572,19 +571,19 @@ void Session::OnAlert()
         {
             lt::torrent_removed_alert* tra = lt::alert_cast<lt::torrent_removed_alert>(alert);
 
-            if (m_metadataSearches.count(tra->info_hash) > 0)
+            if (m_metadataSearches.count(tra->info_hashes) > 0)
             {
-                m_metadataSearches.erase(tra->info_hash);
+                m_metadataSearches.erase(tra->info_hashes);
                 break;
             }
 
-            auto handle = m_torrents.at(tra->info_hash);
+            auto handle = m_torrents.at(tra->info_hashes);
 
             InfoHashEvent evt(ptEVT_TORRENT_REMOVED);
-            evt.SetData(tra->info_hash);
+            evt.SetData(tra->info_hashes);
             wxPostEvent(m_parent, evt);
 
-            m_torrents.erase(tra->info_hash);
+            m_torrents.erase(tra->info_hashes);
 
             std::vector<std::string> statements =
             {
@@ -595,13 +594,13 @@ void Session::OnAlert()
 
             std::stringstream hash;
 
-            if (tra->info_hash.has_v2())
+            if (tra->info_hashes.has_v2())
             {
-                hash << tra->info_hash.v2;
+                hash << tra->info_hashes.v2;
             }
             else
             {
-                hash << tra->info_hash.v1;
+                hash << tra->info_hashes.v1;
             }
 
             for (std::string const& sql : statements)
@@ -673,130 +672,6 @@ void Session::LoadTorrents()
     }
 }
 
-void Session::LoadTorrentsOld()
-{
-    fs::path dataDirectory = m_env->GetApplicationDataPath();
-    fs::path torrentsDirectory = dataDirectory / "Torrents";
-
-    if (!fs::exists(torrentsDirectory))
-    {
-        return;
-    }
-
-    typedef std::pair<int64_t, SessionLoadItem> prio_item_t;
-    auto comparer = [](const prio_item_t& lhs, const prio_item_t& rhs)
-    {
-        return lhs.first > rhs.first;
-    };
-
-    std::priority_queue<prio_item_t, std::vector<prio_item_t>, decltype(comparer)> queue(comparer);
-    int64_t maxPosition = std::numeric_limits<int64_t>::max();
-
-    for (auto& tmp : fs::directory_iterator(torrentsDirectory))
-    {
-        fs::path datFile = tmp.path();
-
-        if (datFile.extension() != ".dat")
-        {
-            continue;
-        }
-
-        std::ifstream datStream(datFile, std::ios::binary | std::ios::in);
-
-        SessionLoadItem item(datFile);
-        std::stringstream ss;
-        ss << datStream.rdbuf();
-        std::string c = ss.str();
-        item.resume_data.assign(c.begin(), c.end());
-
-        lt::error_code ltec;
-        lt::bdecode_node node = lt::bdecode(item.resume_data, ltec);
-
-        if (ltec || node.type() != lt::bdecode_node::type_t::dict_t)
-        {
-            continue;
-        }
-
-        item.magnet_save_path = node.dict_find_string_value("pT-magnet-savePath").to_string();
-        item.magnet_url = node.dict_find_string_value("pT-magnet-url").to_string();
-
-        int64_t queuePosition = node.dict_find_int_value("pT-queuePosition", maxPosition);
-        if (queuePosition < 0) { queuePosition = maxPosition; }
-
-        queue.push({ queuePosition, item });
-    }
-
-    while (!queue.empty())
-    {
-        SessionLoadItem item = queue.top().second;
-        queue.pop();
-
-        fs::path torrent_file = fs::path(item.path).replace_extension(".torrent");
-
-        if (!fs::exists(torrent_file)
-            && item.magnet_url.empty())
-        {
-            fs::remove(torrent_file);
-            continue;
-        }
-
-        lt::add_torrent_params params;
-
-        if (!item.resume_data.empty())
-        {
-            lt::error_code ltec;
-            params = lt::read_resume_data(
-                item.resume_data,
-                ltec);
-        }
-
-        if (fs::exists(torrent_file))
-        {
-
-            std::ifstream torrent_input(torrent_file, std::ios::binary);
-            std::stringstream ss;
-            ss << torrent_input.rdbuf();
-            std::string torrent_buf = ss.str();
-
-            lt::bdecode_node node;
-            lt::error_code ltec;
-            lt::bdecode(
-                &torrent_buf[0],
-                &torrent_buf[0] + torrent_buf.size(),
-                node,
-                ltec);
-
-            if (ltec)
-            {
-                continue;
-            }
-
-            params.ti = std::make_shared<lt::torrent_info>(node);
-        }
-
-        if (!item.magnet_url.empty())
-        {
-            lt::error_code ec;
-            lt::parse_magnet_uri(item.magnet_url, params, ec);
-            params.save_path = item.magnet_save_path;
-        }
-
-        m_session->async_add_torrent(params);
-
-        // Remove torrent and dat file
-        std::error_code fec;
-        if (fs::exists(item.path, fec)) fs::remove(item.path, fec);
-        if (fs::exists(torrent_file, fec)) fs::remove(torrent_file, fec);
-    }
-
-    // if torrents dir is empty, remove it
-    std::error_code dec;
-    if (fs::is_empty(torrentsDirectory, dec))
-    {
-        fs::remove(torrentsDirectory, dec);
-    }
-}
-
 void Session::PauseAfterRecheck(pt::BitTorrent::TorrentHandle* th)
 {
     if (m_pauseAfterRecheck.find(th->InfoHash()) != m_pauseAfterRecheck.end())
@@ -835,7 +710,7 @@ void Session::SaveTorrents()
     auto temp = m_session->get_torrent_status(
         [this](const lt::torrent_status& st)
         {
-            return m_metadataSearches.count(st.info_hash) == 0;
+            return m_metadataSearches.count(st.info_hashes) == 0;
         });
 
     for (lt::torrent_status& st : temp)
@@ -867,13 +742,13 @@ void Session::SaveTorrents()
     {
         std::stringstream ss;
 
-        if (st.info_hash.has_v2())
+        if (st.info_hashes.has_v2())
         {
-            ss << st.info_hash.v2;
+            ss << st.info_hashes.v2;
         }
         else
         {
-            ss << st.info_hash.v1;
+            ss << st.info_hashes.v1;
         }
 
         // Store state

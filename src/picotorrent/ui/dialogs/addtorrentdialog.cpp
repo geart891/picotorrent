@@ -94,6 +94,9 @@ AddTorrentDialog::AddTorrentDialog(wxWindow* parent, wxWindowID id, std::vector<
         wxDATAVIEW_CELL_INERT,
         FromDIP(80));
 
+    // Ugly hack to prevent the last "real" column from stretching.
+    m_filesView->AppendColumn(new wxDataViewColumn(wxEmptyString, new wxDataViewTextRenderer(), -1, 0));
+
     nameCol->GetRenderer()->EnableEllipsize(wxELLIPSIZE_END);
     prioCol->GetRenderer()->EnableEllipsize(wxELLIPSIZE_END);
 
@@ -226,7 +229,7 @@ void AddTorrentDialog::MetadataFound(std::shared_ptr<lt::torrent_info> const& ti
     {
         auto& params = m_params.at(i);
 
-        if (params.info_hash == ti->info_hashes())
+        if (params.info_hashes == ti->info_hashes())
         {
             params.ti = ti;
 
@@ -254,8 +257,8 @@ wxString AddTorrentDialog::GetTorrentDisplayName(libtorrent::add_torrent_params 
 
     std::stringstream hash;
 
-    if (params.info_hash.has_v2()) hash << params.info_hash.v2;
-    if (params.info_hash.has_v1()) hash << params.info_hash.v1;
+    if (params.info_hashes.has_v2()) hash << params.info_hashes.v2;
+    if (params.info_hashes.has_v1()) hash << params.info_hashes.v1;
 
     return hash.str();
 }
@@ -285,15 +288,15 @@ wxString AddTorrentDialog::GetTorrentDisplayInfoHash(libtorrent::add_torrent_par
             hash << params.ti->info_hashes().v1;
         }
     }
-    else if (params.info_hash.has_v1() || params.info_hash.has_v2())
+    else if (params.info_hashes.has_v1() || params.info_hashes.has_v2())
     {
-        if (params.info_hash.has_v2())
+        if (params.info_hashes.has_v2())
         {
-            hash << params.info_hash.v2;
+            hash << params.info_hashes.v2;
         }
         else
         {
-            hash << params.info_hash.v1;
+            hash << params.info_hashes.v1;
         }
     }
     else
